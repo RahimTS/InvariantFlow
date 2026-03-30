@@ -9,15 +9,22 @@ from app.agents.graph import LangGraphRuleRunner
 from app.agents.testing.blackboard_runner import BlackboardRuleRunner
 from app.agents.testing.critic import Critic
 from app.agents.testing.executor import Executor
+from app.agents.testing.oracle import Oracle
 from app.agents.testing.rule_runner import RuleTestRunner
 from app.agents.testing.scenario_generator import ScenarioGenerator
 from app.config import settings
 from app.llm.client import create_openrouter_client
 from app.llm.cost import CostTracker
-from app.memory.blackboard import Blackboard
-from app.memory.exec_log import ExecutionLog
-from app.memory.rule_store import RuleStore
+from app.memory.factory import (
+    close_blackboard,
+    create_blackboard,
+    emit_app_event,
+    get_execution_log,
+    get_rule_store,
+    get_state_store,
+)
 from app.memory.seeds import seed_starter_rules
+from app.runtime.events import make_event
 from app.runtime import run_registry
 
 router = APIRouter(prefix="/api/v1/testing", tags=["testing"])
@@ -37,20 +44,37 @@ async def run_rules(body: RunRulesRequest, request: Request) -> dict:
     run_id = await run_registry.create_run(
         metadata={"mode": body.mode, "entity": body.entity, "seed_starter": body.seed_starter}
     )
-    db_path = body.db_path or settings.sqlite_db_path
     artifacts_dir = body.artifacts_dir or "artifacts"
 
-    rule_store = RuleStore(db_path=db_path)
-    await rule_store.init()
+    async def emit(event: dict) -> None:
+        await emit_app_event(request.app, event)
+
+    should_emit_run_events = settings.storage_backend == "docker"
+    if should_emit_run_events:
+        await emit(
+            make_event(
+                "RUN_START",
+                {"mode": body.mode, "entity": body.entity, "seed_starter": body.seed_starter},
+                run_id=run_id,
+            )
+        )
+
+    rule_store = await get_rule_store(request.app, body.db_path)
     if body.seed_starter:
         await seed_starter_rules(rule_store)
 
-    execution_log = ExecutionLog(artifacts_dir=artifacts_dir)
-    executor = Executor(app=request.app)
+    execution_log = get_execution_log(request.app, artifacts_dir)
+    executor = Executor(
+        app=request.app,
+        state_store=get_state_store(request.app),
+        event_emitter=emit,
+    )
     llm_client = create_openrouter_client()
     cost_tracker = CostTracker(
         max_per_rule_usd=settings.max_cost_per_rule_usd,
         max_per_run_usd=settings.max_cost_per_run_usd,
+        event_emitter=emit,
+        run_id=run_id,
     )
     overrides = body.model_overrides or {}
     scenario_generator = ScenarioGenerator(
@@ -62,7 +86,10 @@ async def run_rules(body: RunRulesRequest, request: Request) -> dict:
         llm_client=llm_client,
         model=overrides.get("critic"),
         cost_tracker=cost_tracker,
+        event_emitter=emit,
     )
+    oracle = Oracle(event_emitter=emit)
+    blackboard = None
 
     try:
         if body.mode == "direct":
@@ -70,13 +97,16 @@ async def run_rules(body: RunRulesRequest, request: Request) -> dict:
                 rule_store=rule_store,
                 scenario_generator=scenario_generator,
                 executor=executor,
+                oracle=oracle,
                 execution_log=execution_log,
             )
-            summary = await runner.run_active_rules(entity=body.entity)
+            summary = await runner.run_active_rules(entity=body.entity, run_id=run_id)
             payload = _serialize_direct_summary(summary)
             payload["cost"] = cost_tracker.snapshot()
             payload["run_id"] = run_id
             await run_registry.complete_run(run_id, payload)
+            if should_emit_run_events:
+                await emit(make_event("RUN_COMPLETE", {"status": "completed", "summary": payload}, run_id=run_id))
             return payload
 
         if body.mode == "langgraph":
@@ -84,6 +114,7 @@ async def run_rules(body: RunRulesRequest, request: Request) -> dict:
                 rule_store=rule_store,
                 scenario_generator=scenario_generator,
                 executor=executor,
+                oracle=oracle,
                 critic=critic,
                 execution_log=execution_log,
                 cost_tracker=cost_tracker,
@@ -95,27 +126,34 @@ async def run_rules(body: RunRulesRequest, request: Request) -> dict:
             payload["cost"] = cost_tracker.snapshot()
             payload["run_id"] = run_id
             await run_registry.complete_run(run_id, payload)
+            if should_emit_run_events:
+                await emit(make_event("RUN_COMPLETE", {"status": "completed", "summary": payload}, run_id=run_id))
             return payload
 
-        blackboard = Blackboard(
-            timeout_seconds=settings.blackboard_task_timeout_seconds,
-            max_retries=settings.blackboard_max_retries,
-        )
+        blackboard = await create_blackboard(request.app, run_id=run_id)
         runner = BlackboardRuleRunner(
             rule_store=rule_store,
             blackboard=blackboard,
             scenario_generator=scenario_generator,
             executor=executor,
+            oracle=oracle,
             execution_log=execution_log,
         )
-        payload = await runner.run_active_rules(entity=body.entity)
+        payload = await runner.run_active_rules(entity=body.entity, run_id=run_id)
         payload["cost"] = cost_tracker.snapshot()
         payload["run_id"] = run_id
         await run_registry.complete_run(run_id, payload)
+        if should_emit_run_events:
+            await emit(make_event("RUN_COMPLETE", {"status": "completed", "summary": payload}, run_id=run_id))
         return payload
     except Exception as exc:
         await run_registry.fail_run(run_id, str(exc))
+        if should_emit_run_events:
+            await emit(make_event("RUN_FAILED", {"error": str(exc)}, run_id=run_id))
         raise
+    finally:
+        if body.mode == "blackboard" and blackboard is not None:
+            await close_blackboard(blackboard)
 
 
 @router.get("/runs")

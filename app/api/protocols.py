@@ -25,17 +25,50 @@ _AGENT_CARDS = [
 @router.get("/.well-known/agent-card.json")
 async def main_agent_card() -> dict:
     return {
-        "name": "InvariantFlow Orchestrator",
-        "version": "0.1.0",
-        "description": "Business logic API validator swarm orchestrator",
+        "name": "InvariantFlow",
+        "description": "Business logic API validator swarm",
+        "version": "0.2.0",
+        "url": settings.mock_api_base_url,
+        "capabilities": {
+            "streaming": True,
+            "pushNotifications": False,
+        },
+        "skills": [
+            {
+                "id": "test_rules",
+                "name": "Test business rules against APIs",
+                "description": "Execute scenarios for approved business rules and report violations",
+            },
+            {
+                "id": "ingest_rules",
+                "name": "Ingest business specifications",
+                "description": "Extract and normalize business rules from raw text",
+            },
+        ],
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["application/json"],
         "agents": _AGENT_CARDS,
-        "protocols": ["a2a", "mcp", "sse", "ag-ui"],
     }
 
 
 @router.get("/api/v1/agents/cards")
 async def list_agent_cards() -> dict:
     return {"count": len(_AGENT_CARDS), "agents": _AGENT_CARDS}
+
+
+@router.get("/api/v1/agents/{agent_id}/card")
+async def get_agent_card(agent_id: str) -> dict:
+    for card in _AGENT_CARDS:
+        if card["agent_id"] == agent_id:
+            return {
+                "agent_id": card["agent_id"],
+                "name": card["name"],
+                "description": f"{card['name']} agent for InvariantFlow",
+                "capabilities": card["capabilities"],
+                "model": card["model"],
+                "streaming": True,
+            }
+    return {"agent_id": agent_id, "status": "not_found"}
 
 
 @router.get("/api/v1/mcp/tools")
@@ -45,7 +78,11 @@ async def list_mcp_tools() -> dict:
         {"name": "ingest_rules", "description": "Ingest raw business rules", "path": "/api/v1/ingestion/ingest"},
         {"name": "list_pending_rules", "description": "List rules pending approval", "path": "/api/v1/rules/pending"},
     ]
-    return {"count": len(tools), "tools": tools}
+    return {
+        "count": len(tools),
+        "tools": tools,
+        "mcp_server_path": "/mcp",
+    }
 
 
 class MCPCallRequest(BaseModel):
@@ -55,12 +92,12 @@ class MCPCallRequest(BaseModel):
 
 @router.post("/api/v1/mcp/call")
 async def mcp_call(body: MCPCallRequest) -> dict:
-    # V1 lightweight MCP-style shim for local integration tests.
+    # Compatibility shim. Real MCP server is mounted at /mcp when fastapi-mcp is installed.
     return {
         "tool": body.tool,
         "args": body.args,
         "status": "accepted",
-        "note": "MCP shim endpoint; integrate fastapi-mcp in production Phase 4.",
+        "note": "Compatibility shim endpoint. Prefer /mcp for real MCP protocol.",
     }
 
 

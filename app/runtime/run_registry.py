@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from app.runtime.events import make_event
+
 
 class RunRegistry:
     def __init__(self, max_runs: int = 200) -> None:
@@ -26,7 +28,7 @@ class RunRegistry:
             }
             self._run_order.append(run_id)
             self._trim()
-        await self.publish({"event": "run_started", "run_id": run_id, "timestamp": now})
+        await self.publish(make_event("RUN_START", {"run_id": run_id}, run_id=run_id))
         return run_id
 
     async def complete_run(self, run_id: str, summary: dict) -> None:
@@ -40,7 +42,13 @@ class RunRegistry:
             if run_id not in self._run_order:
                 self._run_order.append(run_id)
                 self._trim()
-        await self.publish({"event": "run_completed", "run_id": run_id, "timestamp": now, "summary": summary})
+        await self.publish(
+            make_event(
+                "RUN_COMPLETE",
+                {"run_id": run_id, "summary": summary},
+                run_id=run_id,
+            )
+        )
 
     async def fail_run(self, run_id: str, error: str) -> None:
         now = _now()
@@ -53,7 +61,13 @@ class RunRegistry:
             if run_id not in self._run_order:
                 self._run_order.append(run_id)
                 self._trim()
-        await self.publish({"event": "run_failed", "run_id": run_id, "timestamp": now, "error": error})
+        await self.publish(
+            make_event(
+                "RUN_FAILED",
+                {"run_id": run_id, "error": error},
+                run_id=run_id,
+            )
+        )
 
     async def list_runs(self, limit: int = 50) -> list[dict]:
         async with self._lock:
@@ -105,4 +119,3 @@ def _now() -> str:
 
 
 run_registry = RunRegistry()
-

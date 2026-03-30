@@ -4,6 +4,7 @@ Task-driven deterministic runner built on Blackboard task posting/claiming.
 
 from __future__ import annotations
 
+import inspect
 from uuid import uuid4
 
 from app.agents.testing.executor import Executor
@@ -37,8 +38,15 @@ class BlackboardRuleRunner:
         self._oracle = oracle or Oracle()
         self._execution_log = execution_log or ExecutionLog()
         self._results: list[dict] = []
+        self._run_id: str | None = None
 
-    async def run_active_rules(self, entity: str | None = None, max_cycles: int = 1000) -> dict:
+    async def run_active_rules(
+        self,
+        entity: str | None = None,
+        max_cycles: int = 1000,
+        run_id: str | None = None,
+    ) -> dict:
+        self._run_id = run_id
         rules = await self._rule_store.get_active_rules(entity=entity)
         for rule in rules:
             await self._blackboard.post_task(
@@ -135,8 +143,11 @@ class BlackboardRuleRunner:
             rule_id=rule_id,
             scenario=scenario,
             flow_plan=flow_plan,
+            run_id=self._run_id,
         )
-        self._execution_log.append(trace)
+        maybe = self._execution_log.append(trace)
+        if inspect.isawaitable(maybe):
+            await maybe
         await self._blackboard.post_task(
             task_id=_task_id("validate", f"{rule_id}:{scenario.scenario_id}"),
             task_type="validate",

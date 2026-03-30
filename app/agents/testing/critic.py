@@ -4,11 +4,14 @@ Critic with LLM-first analysis and deterministic fallback.
 
 from __future__ import annotations
 
+import inspect
 import logging
+from typing import Any
 
 from app.config import settings
 from app.llm.client import StructuredLLMClient, get_last_response
 from app.llm.cost import CostLimitExceeded, CostTracker
+from app.runtime.events import make_event
 from app.schemas.feedback import CriticFeedback, CriticFinding
 from app.schemas.rules import BusinessRule
 from app.schemas.scenarios import Scenario
@@ -23,10 +26,12 @@ class Critic:
         llm_client: StructuredLLMClient | None = None,
         model: str | None = None,
         cost_tracker: CostTracker | None = None,
+        event_emitter: Any | None = None,
     ) -> None:
         self._llm_client = llm_client
         self._model = model or settings.critic_model
         self._cost_tracker = cost_tracker
+        self._event_emitter = event_emitter
 
     async def analyze_for_rule(
         self,
@@ -43,7 +48,7 @@ class Critic:
                     self._cost_tracker.ensure_can_call(rule.rule_id)
                 except CostLimitExceeded as exc:
                     logger.warning("Critic LLM skipped due to cost limit for %s: %s", rule.rule_id, exc)
-                    return self.analyze(
+                    feedback = self.analyze(
                         test_run_id=test_run_id,
                         rule=rule,
                         scenarios=scenarios,
@@ -51,8 +56,10 @@ class Critic:
                         iteration=iteration,
                         max_iterations=max_iterations,
                     )
+                    await self._emit_feedback(feedback)
+                    return feedback
             try:
-                return await self._analyze_with_llm(
+                feedback = await self._analyze_with_llm(
                     test_run_id=test_run_id,
                     rule=rule,
                     scenarios=scenarios,
@@ -60,11 +67,13 @@ class Critic:
                     iteration=iteration,
                     max_iterations=max_iterations,
                 )
+                await self._emit_feedback(feedback)
+                return feedback
             except CostLimitExceeded as exc:
                 logger.warning("Critic LLM cost limit exceeded for %s: %s", rule.rule_id, exc)
             except Exception as exc:
                 logger.warning("Critic LLM failed for %s, falling back: %s", rule.rule_id, exc)
-        return self.analyze(
+        feedback = self.analyze(
             test_run_id=test_run_id,
             rule=rule,
             scenarios=scenarios,
@@ -72,6 +81,8 @@ class Critic:
             iteration=iteration,
             max_iterations=max_iterations,
         )
+        await self._emit_feedback(feedback)
+        return feedback
 
     def analyze(
         self,
@@ -158,6 +169,31 @@ class Critic:
             summary=summary,
             iterations_remaining=max(0, max_iterations - iteration),
         )
+
+    async def _emit_feedback(self, feedback: CriticFeedback) -> None:
+        if self._event_emitter is None:
+            return
+        for finding in feedback.findings:
+            event = make_event(
+                "CRITIC_FINDING",
+                {
+                    "test_run_id": feedback.test_run_id,
+                    "rule_id": feedback.rule_id,
+                    "type": finding.type,
+                    "target": finding.target,
+                    "detail": finding.detail,
+                    "action": finding.action,
+                    "payload": finding.payload,
+                    "iterations_remaining": feedback.iterations_remaining,
+                },
+                run_id=feedback.test_run_id,
+            )
+            try:
+                result = self._event_emitter(event)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.exception("critic event emission failed")
 
     async def _analyze_with_llm(
         self,

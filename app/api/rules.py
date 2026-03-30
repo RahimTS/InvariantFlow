@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.memory.rule_store import RuleStore
+from app.memory.factory import get_rule_store
 from app.schemas.rules import BusinessRule
 
 router = APIRouter(prefix="/api/v1/rules", tags=["rules"])
@@ -29,17 +29,15 @@ class RejectRuleRequest(BaseModel):
 
 
 @router.get("/pending")
-async def get_pending_rules(db_path: str | None = None) -> dict:
-    store = RuleStore(db_path=db_path or "invariantflow.db")
-    await store.init()
+async def get_pending_rules(request: Request, db_path: str | None = None) -> dict:
+    store = await get_rule_store(request.app, db_path)
     rules = await store.get_rules_by_status("proposed")
     return {"count": len(rules), "rules": [r.model_dump(mode="json") for r in rules]}
 
 
 @router.post("/{rule_id}/approve")
-async def approve_rule(rule_id: str, body: ApproveRuleRequest) -> dict:
-    store = RuleStore(db_path=body.db_path or "invariantflow.db")
-    await store.init()
+async def approve_rule(rule_id: str, body: ApproveRuleRequest, request: Request) -> dict:
+    store = await get_rule_store(request.app, body.db_path)
     try:
         approved = await store.approve_rule(
             rule_id=rule_id,
@@ -53,9 +51,8 @@ async def approve_rule(rule_id: str, body: ApproveRuleRequest) -> dict:
 
 
 @router.post("/{rule_id}/reject")
-async def reject_rule(rule_id: str, body: RejectRuleRequest) -> dict:
-    store = RuleStore(db_path=body.db_path or "invariantflow.db")
-    await store.init()
+async def reject_rule(rule_id: str, body: RejectRuleRequest, request: Request) -> dict:
+    store = await get_rule_store(request.app, body.db_path)
     try:
         rejected = await store.reject_rule(
             rule_id=rule_id,
@@ -68,19 +65,16 @@ async def reject_rule(rule_id: str, body: RejectRuleRequest) -> dict:
 
 
 @router.get("/{rule_id}/history")
-async def get_rule_history(rule_id: str, db_path: str | None = None) -> dict:
-    store = RuleStore(db_path=db_path or "invariantflow.db")
-    await store.init()
+async def get_rule_history(rule_id: str, request: Request, db_path: str | None = None) -> dict:
+    store = await get_rule_store(request.app, db_path)
     history = await store.get_rule_history(rule_id)
     return {"rule_id": rule_id, "versions": [r.model_dump(mode="json") for r in history]}
 
 
 @router.get("/{rule_id}")
-async def get_rule(rule_id: str, version: int | None = None, db_path: str | None = None) -> dict:
-    store = RuleStore(db_path=db_path or "invariantflow.db")
-    await store.init()
+async def get_rule(rule_id: str, request: Request, version: int | None = None, db_path: str | None = None) -> dict:
+    store = await get_rule_store(request.app, db_path)
     rule: BusinessRule | None = await store.get_rule(rule_id=rule_id, version=version)
     if rule is None:
         raise HTTPException(status_code=404, detail=f"Rule not found: {rule_id}")
     return {"rule": rule.model_dump(mode="json")}
-

@@ -11,14 +11,19 @@ from datetime import datetime, timezone
 from time import perf_counter
 from uuid import uuid4
 from typing import Any
+import inspect
+import logging
 
 import httpx
 from fastapi import FastAPI
 
 from app.config import settings
 from app.memory.state_store import InMemoryStateStore, StateStore
+from app.runtime.events import make_event
 from app.schemas.execution import ExecutionRecord, ExecutionTrace
 from app.schemas.scenarios import FlowPlan, FlowStep, Scenario
+
+logger = logging.getLogger(__name__)
 
 
 class Executor:
@@ -28,11 +33,13 @@ class Executor:
         base_url: str | None = None,
         app: FastAPI | None = None,
         timeout_seconds: float = 10.0,
+        event_emitter: Any | None = None,
     ) -> None:
         self._state_store = state_store or InMemoryStateStore()
         self._base_url = base_url or settings.mock_api_base_url
         self._app = app
         self._timeout_seconds = timeout_seconds
+        self._event_emitter = event_emitter
 
     async def execute(
         self,
@@ -127,6 +134,20 @@ class Executor:
             latency_ms=latency_ms,
             timestamp=datetime.now(timezone.utc),
         )
+        await self._emit(
+            make_event(
+                "EXECUTION_STEP",
+                {
+                    "run_id": run_id,
+                    "scenario_id": scenario.scenario_id,
+                    "step_number": step.step_number,
+                    "endpoint": endpoint,
+                    "status_code": status_code,
+                    "latency_ms": round(latency_ms, 2),
+                },
+                run_id=run_id,
+            )
+        )
         status_mismatch = (
             status_code != 0 and bool(step.expected_status) and status_code not in step.expected_status
         )
@@ -192,6 +213,16 @@ class Executor:
             return httpx.AsyncClient(transport=transport, base_url="http://testserver")
         return httpx.AsyncClient(base_url=self._base_url)
 
+    async def _emit(self, event: dict[str, Any]) -> None:
+        if self._event_emitter is None:
+            return
+        try:
+            result = self._event_emitter(event)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("executor event emission failed")
+
 
 def _resolve_map(template: dict, scenario_inputs: dict, state_values: dict) -> dict:
     resolved: dict[str, Any] = {}
@@ -245,4 +276,3 @@ def _extract_values(extract_map: dict, response_body: dict) -> dict[str, Any]:
             continue
         extracted[key] = pointer
     return extracted
-

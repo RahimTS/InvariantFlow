@@ -14,7 +14,13 @@ Task lifecycle:  posted → claimed → in_progress → completed
 from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
+import inspect
+import logging
 from typing import Any
+
+from app.runtime.events import make_event
+
+logger = logging.getLogger(__name__)
 
 
 class Blackboard:
@@ -22,12 +28,14 @@ class Blackboard:
         self,
         timeout_seconds: int = 60,
         max_retries: int = 3,
+        event_emitter: Any | None = None,
     ) -> None:
         self._board: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
         self._watcher_task: asyncio.Task | None = None
+        self._event_emitter = event_emitter
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -63,6 +71,7 @@ class Blackboard:
                 "retry_count": 0,
                 "data": data or {},
             }
+        await self._emit(make_event("TASK_POSTED", {"task_id": task_id, "type": task_type, "data": data or {}}))
         return task_id
 
     async def claim_task(
@@ -83,6 +92,12 @@ class Blackboard:
                 task["status"] = "claimed"
                 task["claimed_by"] = agent_id
                 task["claimed_at"] = _now()
+                await self._emit(
+                    make_event(
+                        "TASK_CLAIMED",
+                        {"task_id": task_id, "type": task.get("type"), "agent_id": agent_id},
+                    )
+                )
                 return dict(task)
         return None
 
@@ -98,6 +113,16 @@ class Blackboard:
                 self._board[task_id]["completed_at"] = _now()
                 if result:
                     self._board[task_id]["result"] = result
+                task = dict(self._board[task_id])
+            else:
+                task = None
+        if task is not None:
+            await self._emit(
+                make_event(
+                    "TASK_COMPLETED",
+                    {"task_id": task_id, "type": task.get("type"), "result": result or {}},
+                )
+            )
 
     async def fail_task(self, task_id: str, error: str) -> None:
         async with self._lock:
@@ -107,6 +132,12 @@ class Blackboard:
                 if task["retry_count"] >= self._max_retries:
                     task["status"] = "dead"
                     task["error"] = error
+                    await self._emit(
+                        make_event(
+                            "TASK_DEAD",
+                            {"task_id": task_id, "type": task.get("type"), "error": error},
+                        )
+                    )
                 else:
                     task["status"] = "posted"
                     task["claimed_by"] = None
@@ -147,10 +178,30 @@ class Blackboard:
                         task["retry_count"] += 1
                         if task["retry_count"] >= self._max_retries:
                             task["status"] = "dead"
+                            await self._emit(
+                                make_event(
+                                    "TASK_DEAD",
+                                    {
+                                        "task_id": task.get("task_id"),
+                                        "type": task.get("type"),
+                                        "error": "task timed out",
+                                    },
+                                )
+                            )
                         else:
                             task["status"] = "posted"
                             task["claimed_by"] = None
                             task["claimed_at"] = None
+
+    async def _emit(self, event: dict[str, Any]) -> None:
+        if self._event_emitter is None:
+            return
+        try:
+            result = self._event_emitter(event)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("blackboard event emission failed")
 
 
 def _now() -> str:

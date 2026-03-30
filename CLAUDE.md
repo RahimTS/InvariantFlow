@@ -77,3 +77,7 @@ Phases: 1=Foundation, 2=First Agents (LangGraph), 3=Ingestion Chain, 4=Protocol 
 ## Environment
 
 Requires `OPENROUTER_API_KEY` in `.env`. See `.env.example` once created.
+
+## Dockerfile baseline
+
+For uv-based Python container builds, reuse `docs/DOCKERFILE_UV_REFERENCE.md`.

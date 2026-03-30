@@ -12,18 +12,29 @@ Evaluation rule:
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import logging
+from typing import Any
+
 from app.eval.condition_parser import evaluate
 from app.eval.resolver import build_eval_context
+from app.runtime.events import make_event
+from app.schemas.execution import ExecutionTrace
 from app.schemas.rules import BusinessRule
 from app.schemas.scenarios import Scenario
-from app.schemas.execution import ExecutionTrace
 from app.schemas.validation import OracleVerdict
+
+logger = logging.getLogger(__name__)
 
 
 class Oracle:
+    def __init__(self, event_emitter: Any | None = None) -> None:
+        self._event_emitter = event_emitter
+
     def evaluate(self, rule: BusinessRule, scenario: Scenario, trace: ExecutionTrace) -> OracleVerdict:
         if not trace.records:
-            return OracleVerdict(
+            verdict = OracleVerdict(
                 trace_id=trace.trace_id,
                 rule_id=rule.rule_id,
                 scenario_id=scenario.scenario_id,
@@ -34,6 +45,8 @@ class Oracle:
                 evidence={"reason": "no execution records"},
                 confidence=0.0,
             )
+            self._emit_verdict(verdict)
+            return verdict
 
         last_record = trace.records[-1]
         last_response = last_record.response_body if isinstance(last_record.response_body, dict) else {}
@@ -51,7 +64,7 @@ class Oracle:
                 violated.append(condition)
 
         if unresolved:
-            return OracleVerdict(
+            verdict = OracleVerdict(
                 trace_id=trace.trace_id,
                 rule_id=rule.rule_id,
                 scenario_id=scenario.scenario_id,
@@ -67,22 +80,24 @@ class Oracle:
                 },
                 confidence=0.0,
             )
+            self._emit_verdict(verdict)
+            return verdict
 
         api_accepted = 200 <= last_record.status_code < 300
         if violated and api_accepted:
-            verdict = "fail"
+            verdict_result = "fail"
         elif violated and not api_accepted:
-            verdict = "pass"
+            verdict_result = "pass"
         elif not violated and api_accepted:
-            verdict = "pass"
+            verdict_result = "pass"
         else:
-            verdict = "fail"
+            verdict_result = "fail"
 
-        return OracleVerdict(
+        verdict = OracleVerdict(
             trace_id=trace.trace_id,
             rule_id=rule.rule_id,
             scenario_id=scenario.scenario_id,
-            result=verdict,  # type: ignore[arg-type]
+            result=verdict_result,  # type: ignore[arg-type]
             violated_conditions=violated,
             evaluation_method="deterministic",
             reproducible=True,
@@ -94,4 +109,32 @@ class Oracle:
             },
             confidence=1.0,
         )
+        self._emit_verdict(verdict)
+        return verdict
 
+    def _emit_verdict(self, verdict: OracleVerdict) -> None:
+        self._emit(
+            make_event(
+                "VERDICT",
+                {
+                    "trace_id": verdict.trace_id,
+                    "rule_id": verdict.rule_id,
+                    "scenario_id": verdict.scenario_id,
+                    "result": verdict.result,
+                    "violated_conditions": verdict.violated_conditions,
+                },
+            )
+        )
+
+    def _emit(self, event: dict[str, Any]) -> None:
+        if self._event_emitter is None:
+            return
+        try:
+            result = self._event_emitter(event)
+            if inspect.isawaitable(result):
+                try:
+                    asyncio.get_running_loop().create_task(result)
+                except RuntimeError:
+                    pass
+        except Exception:
+            logger.exception("oracle event emission failed")

@@ -5,6 +5,8 @@ approved RuleStore rules -> scenarios -> flow plans -> execute -> oracle.
 
 from __future__ import annotations
 
+import inspect
+
 from app.agents.testing.executor import Executor
 from app.agents.testing.flow_planner import FlowPlanner
 from app.agents.testing.oracle import Oracle
@@ -32,11 +34,11 @@ class RuleTestRunner:
         self._oracle = oracle or Oracle()
         self._execution_log = execution_log or ExecutionLog()
 
-    async def run_active_rules(self, entity: str | None = None) -> dict:
+    async def run_active_rules(self, entity: str | None = None, run_id: str | None = None) -> dict:
         rules = await self._rule_store.get_active_rules(entity=entity)
         all_results: list[dict] = []
         for rule in rules:
-            results = await self.run_rule(rule)
+            results = await self.run_rule(rule, run_id=run_id)
             all_results.extend(results)
 
         failed = [r for r in all_results if r["verdict"].result == "fail"]
@@ -52,7 +54,7 @@ class RuleTestRunner:
             "results": all_results,
         }
 
-    async def run_rule(self, rule: BusinessRule) -> list[dict]:
+    async def run_rule(self, rule: BusinessRule, run_id: str | None = None) -> list[dict]:
         scenarios = await self._scenario_generator.generate_for_rule(rule)
         rule_results: list[dict] = []
 
@@ -62,8 +64,11 @@ class RuleTestRunner:
                 rule_id=rule.rule_id,
                 scenario=scenario,
                 flow_plan=flow_plan,
+                run_id=run_id,
             )
-            self._execution_log.append(trace)
+            maybe = self._execution_log.append(trace)
+            if inspect.isawaitable(maybe):
+                await maybe
             verdict = self._oracle.evaluate(rule=rule, scenario=scenario, trace=trace)
 
             rule_results.append(

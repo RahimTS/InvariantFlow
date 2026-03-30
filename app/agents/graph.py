@@ -5,6 +5,7 @@ Scenario Generator -> Flow Planner/Executor/Oracle -> Critic -> optional refine.
 
 from __future__ import annotations
 
+import inspect
 from typing import TypedDict, Any
 from uuid import uuid4
 
@@ -87,8 +88,13 @@ class LangGraphRuleRunner:
         }
 
     async def run_rule(self, rule: BusinessRule, max_iterations: int = 3) -> dict:
+        run_id = f"lg_{uuid4().hex}"
+        if self._cost_tracker is not None:
+            bind_run = getattr(self._cost_tracker, "bind_run", None)
+            if callable(bind_run):
+                bind_run(run_id)
         initial: RuleLoopState = {
-            "run_id": f"lg_{uuid4().hex}",
+            "run_id": run_id,
             "rule": rule,
             "iteration": 0,
             "max_iterations": max_iterations,
@@ -146,8 +152,15 @@ class LangGraphRuleRunner:
 
         for scenario in state["pending_scenarios"]:
             flow_plan = self._flow_planner.generate(state["rule"], scenario)
-            trace = await self._executor.execute(state["rule"].rule_id, scenario, flow_plan)
-            self._execution_log.append(trace)
+            trace = await self._executor.execute(
+                state["rule"].rule_id,
+                scenario,
+                flow_plan,
+                run_id=state["run_id"],
+            )
+            maybe = self._execution_log.append(trace)
+            if inspect.isawaitable(maybe):
+                await maybe
             verdict = self._oracle.evaluate(state["rule"], scenario, trace)
             verdicts.append(verdict)
             results.append(

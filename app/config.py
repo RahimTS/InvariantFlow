@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Literal
 
 
 class Settings(BaseSettings):
@@ -33,6 +34,14 @@ class Settings(BaseSettings):
     heartbeat_missed_limit: int = 3
 
     sqlite_db_path: str = "invariantflow.db"
+
+    # V2 storage/profile selection
+    storage_backend: Literal["local", "docker"] = "local"
+    postgres_dsn: str = "postgresql://invariantflow:invariantflow@localhost:5432/invariantflow"
+    redis_url: str = "redis://localhost:6379/0"
+    redis_state_ttl_seconds: int = 3600
+    redis_events_channel: str = "events:testing"
+    frontend_url: str = "http://localhost:5173"
 
 
 settings = Settings()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from app.agents.ingestion.extractor import Extractor
@@ -8,7 +8,7 @@ from app.agents.ingestion.normalizer import Normalizer
 from app.agents.ingestion.pipeline import IngestionPipeline
 from app.agents.ingestion.rule_validator import RuleValidator
 from app.llm.client import create_openrouter_client
-from app.memory.rule_store import RuleStore
+from app.memory.factory import get_rule_store
 
 router = APIRouter(prefix="/api/v1/ingestion", tags=["ingestion"])
 
@@ -20,9 +20,8 @@ class IngestRequest(BaseModel):
 
 
 @router.post("/ingest")
-async def ingest_text(body: IngestRequest) -> dict:
-    store = RuleStore(db_path=body.db_path or "invariantflow.db")
-    await store.init()
+async def ingest_text(body: IngestRequest, request: Request) -> dict:
+    store = await get_rule_store(request.app, body.db_path)
     llm_client = create_openrouter_client()
     pipeline = IngestionPipeline(
         rule_store=store,
@@ -31,4 +30,3 @@ async def ingest_text(body: IngestRequest) -> dict:
         validator=RuleValidator(),
     )
     return await pipeline.ingest_text(source=body.source, text=body.text)
-

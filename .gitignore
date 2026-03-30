@@ -205,3 +205,14 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# InvariantFlow project outputs
+artifacts/
+invariantflow.db
+*.db
+
+# Frontend build/runtime
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+frontend/.vite/
