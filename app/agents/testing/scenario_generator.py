@@ -4,10 +4,15 @@ Scenario generator with LLM-first mode and deterministic fallback.
 
 from __future__ import annotations
 
+import logging
+
 from app.config import settings
-from app.llm.client import StructuredLLMClient
+from app.llm.client import StructuredLLMClient, get_last_response
+from app.llm.cost import CostLimitExceeded, CostTracker
 from app.schemas.rules import BusinessRule
 from app.schemas.scenarios import Scenario
+
+logger = logging.getLogger(__name__)
 
 
 class ScenarioGenerator:
@@ -16,19 +21,29 @@ class ScenarioGenerator:
         max_scenarios: int | None = None,
         llm_client: StructuredLLMClient | None = None,
         model: str | None = None,
+        cost_tracker: CostTracker | None = None,
     ) -> None:
         self._max_scenarios = max_scenarios or settings.max_scenarios_per_rule
         self._llm_client = llm_client
         self._model = model or settings.scenario_generator_model
+        self._cost_tracker = cost_tracker
 
     async def generate_for_rule(self, rule: BusinessRule) -> list[Scenario]:
         if self._llm_client is not None:
+            if self._cost_tracker is not None:
+                try:
+                    self._cost_tracker.ensure_can_call(rule.rule_id)
+                except CostLimitExceeded as exc:
+                    logger.warning("Scenario LLM skipped due to cost limit for %s: %s", rule.rule_id, exc)
+                    return self.generate(rule)
             try:
                 scenarios = await self._generate_with_llm(rule)
                 if scenarios:
                     return scenarios[: self._max_scenarios]
-            except Exception:
-                pass
+            except CostLimitExceeded as exc:
+                logger.warning("Scenario LLM cost limit exceeded for %s: %s", rule.rule_id, exc)
+            except Exception as exc:
+                logger.warning("Scenario LLM failed for %s, falling back: %s", rule.rule_id, exc)
         return self.generate(rule)
 
     def generate(self, rule: BusinessRule) -> list[Scenario]:
@@ -55,6 +70,14 @@ class ScenarioGenerator:
             schema=_SCENARIO_SCHEMA,
             temperature=0.2,
         )
+        if self._cost_tracker is not None:
+            response = get_last_response(self._llm_client)
+            if response is not None:
+                self._cost_tracker.add_usage(
+                    rule_id=rule.rule_id,
+                    model=response.model,
+                    usage=response.usage,
+                )
         raw_scenarios = payload.get("scenarios")
         if not isinstance(raw_scenarios, list):
             raise ValueError("LLM structured output missing 'scenarios' list")

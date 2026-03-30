@@ -13,6 +13,7 @@ from app.agents.testing.rule_runner import RuleTestRunner
 from app.agents.testing.scenario_generator import ScenarioGenerator
 from app.config import settings
 from app.llm.client import create_openrouter_client
+from app.llm.cost import CostTracker
 from app.memory.blackboard import Blackboard
 from app.memory.exec_log import ExecutionLog
 from app.memory.rule_store import RuleStore
@@ -47,14 +48,20 @@ async def run_rules(body: RunRulesRequest, request: Request) -> dict:
     execution_log = ExecutionLog(artifacts_dir=artifacts_dir)
     executor = Executor(app=request.app)
     llm_client = create_openrouter_client()
+    cost_tracker = CostTracker(
+        max_per_rule_usd=settings.max_cost_per_rule_usd,
+        max_per_run_usd=settings.max_cost_per_run_usd,
+    )
     overrides = body.model_overrides or {}
     scenario_generator = ScenarioGenerator(
         llm_client=llm_client,
         model=overrides.get("scenario_generator"),
+        cost_tracker=cost_tracker,
     )
     critic = Critic(
         llm_client=llm_client,
         model=overrides.get("critic"),
+        cost_tracker=cost_tracker,
     )
 
     try:
@@ -67,6 +74,7 @@ async def run_rules(body: RunRulesRequest, request: Request) -> dict:
             )
             summary = await runner.run_active_rules(entity=body.entity)
             payload = _serialize_direct_summary(summary)
+            payload["cost"] = cost_tracker.snapshot()
             payload["run_id"] = run_id
             await run_registry.complete_run(run_id, payload)
             return payload
@@ -78,11 +86,13 @@ async def run_rules(body: RunRulesRequest, request: Request) -> dict:
                 executor=executor,
                 critic=critic,
                 execution_log=execution_log,
+                cost_tracker=cost_tracker,
             )
             payload = await runner.run_active_rules(
                 entity=body.entity,
                 max_iterations=settings.max_feedback_iterations,
             )
+            payload["cost"] = cost_tracker.snapshot()
             payload["run_id"] = run_id
             await run_registry.complete_run(run_id, payload)
             return payload
@@ -99,6 +109,7 @@ async def run_rules(body: RunRulesRequest, request: Request) -> dict:
             execution_log=execution_log,
         )
         payload = await runner.run_active_rules(entity=body.entity)
+        payload["cost"] = cost_tracker.snapshot()
         payload["run_id"] = run_id
         await run_registry.complete_run(run_id, payload)
         return payload

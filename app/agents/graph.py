@@ -15,6 +15,7 @@ from app.agents.testing.executor import Executor
 from app.agents.testing.flow_planner import FlowPlanner
 from app.agents.testing.oracle import Oracle
 from app.agents.testing.scenario_generator import ScenarioGenerator
+from app.llm.cost import CostTracker
 from app.memory.exec_log import ExecutionLog
 from app.memory.rule_store import RuleStore
 from app.schemas.feedback import CriticFeedback
@@ -47,6 +48,7 @@ class LangGraphRuleRunner:
         oracle: Oracle | None = None,
         critic: Critic | None = None,
         execution_log: ExecutionLog | None = None,
+        cost_tracker: CostTracker | None = None,
     ) -> None:
         self._rule_store = rule_store
         self._scenario_generator = scenario_generator or ScenarioGenerator()
@@ -55,6 +57,7 @@ class LangGraphRuleRunner:
         self._oracle = oracle or Oracle()
         self._critic = critic or Critic()
         self._execution_log = execution_log or ExecutionLog()
+        self._cost_tracker = cost_tracker
         self._graph = self._build_graph()
 
     async def run_active_rules(self, entity: str | None = None, max_iterations: int = 3) -> dict:
@@ -80,6 +83,7 @@ class LangGraphRuleRunner:
             "inconclusive": len(inconclusive),
             "results": combined_results,
             "feedback": combined_feedback,
+            "cost": self._cost_tracker.snapshot() if self._cost_tracker else None,
         }
 
     async def run_rule(self, rule: BusinessRule, max_iterations: int = 3) -> dict:
@@ -187,6 +191,8 @@ class LangGraphRuleRunner:
             return "end"
         feedback = state["last_feedback"]
         if feedback is None or not feedback.findings:
+            return "end"
+        if self._cost_tracker is not None and self._cost_tracker.is_exceeded(state["rule"].rule_id):
             return "end"
         if _has_diminishing_returns(state["feedback_history"]):
             return "end"

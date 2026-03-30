@@ -40,6 +40,10 @@ class OpenRouterClient:
         self._max_retries = max_retries
         self._app_name = app_name
         self._http_client = http_client
+        self._last_response: LLMResponse | None = None
+
+    def get_last_response(self) -> LLMResponse | None:
+        return self._last_response
 
     async def complete(
         self,
@@ -63,7 +67,7 @@ class OpenRouterClient:
         content = _coerce_message_content(message.get("content"))
         usage_raw = raw.get("usage") or {}
 
-        return LLMResponse(
+        out = LLMResponse(
             model=raw.get("model", model),
             content=content,
             raw=raw,
@@ -73,6 +77,8 @@ class OpenRouterClient:
                 total_tokens=int(usage_raw.get("total_tokens", 0) or 0),
             ),
         )
+        self._last_response = out
+        return out
 
     async def generate_structured(
         self,
@@ -156,6 +162,16 @@ def create_openrouter_client() -> OpenRouterClient | None:
     )
 
 
+def get_last_response(client: StructuredLLMClient) -> LLMResponse | None:
+    getter = getattr(client, "get_last_response", None)
+    if callable(getter):
+        return getter()
+    value = getattr(client, "_last_response", None)
+    if isinstance(value, LLMResponse):
+        return value
+    return None
+
+
 def _coerce_message_content(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -168,4 +184,3 @@ def _coerce_message_content(content: Any) -> str:
                 chunks.append(item)
         return "\n".join(chunks).strip()
     return str(content)
-

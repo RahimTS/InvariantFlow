@@ -5,12 +5,15 @@ LLM-first with deterministic fallback.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 
 from app.config import settings
 from app.llm.client import StructuredLLMClient
 from app.schemas.rules import BusinessRule, RawExtraction
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,8 +37,8 @@ class Normalizer:
                 rules = await self._normalize_with_llm(extraction)
                 if rules:
                     return NormalizerResult(rules=rules, used_llm=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Normalizer LLM failed for source=%s, falling back: %s", extraction.source, exc)
         return NormalizerResult(rules=self._normalize_deterministic(extraction), used_llm=False)
 
     async def _normalize_with_llm(self, extraction: RawExtraction) -> list[BusinessRule]:
@@ -118,22 +121,6 @@ class Normalizer:
                 )
             )
 
-        if not rules and extraction.source:
-            rules.append(
-                BusinessRule(
-                    rule_id="NRM_001",
-                    type="derived",
-                    description=f"No rule-like statement extracted from source={extraction.source}",
-                    entities=["Shipment"],
-                    conditions=["entities.shipment.status != null"],
-                    expected_effect=["shipment state should remain trackable"],
-                    invalid_scenarios=["shipment status is missing"],
-                    source=[extraction.source],
-                    status="proposed",
-                    created_by="normalizer_fallback",
-                    requires_llm=True,
-                )
-            )
         return rules
 
 
@@ -195,4 +182,3 @@ def _build_prompt(extraction: RawExtraction) -> str:
         "Raw rules:\n"
         + "\n".join(f"- {r}" for r in extraction.raw_rules)
     )
-

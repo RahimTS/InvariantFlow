@@ -4,12 +4,17 @@ Critic with LLM-first analysis and deterministic fallback.
 
 from __future__ import annotations
 
+import logging
+
 from app.config import settings
-from app.llm.client import StructuredLLMClient
+from app.llm.client import StructuredLLMClient, get_last_response
+from app.llm.cost import CostLimitExceeded, CostTracker
 from app.schemas.feedback import CriticFeedback, CriticFinding
 from app.schemas.rules import BusinessRule
 from app.schemas.scenarios import Scenario
 from app.schemas.validation import OracleVerdict
+
+logger = logging.getLogger(__name__)
 
 
 class Critic:
@@ -17,9 +22,11 @@ class Critic:
         self,
         llm_client: StructuredLLMClient | None = None,
         model: str | None = None,
+        cost_tracker: CostTracker | None = None,
     ) -> None:
         self._llm_client = llm_client
         self._model = model or settings.critic_model
+        self._cost_tracker = cost_tracker
 
     async def analyze_for_rule(
         self,
@@ -31,6 +38,19 @@ class Critic:
         max_iterations: int,
     ) -> CriticFeedback:
         if self._llm_client is not None:
+            if self._cost_tracker is not None:
+                try:
+                    self._cost_tracker.ensure_can_call(rule.rule_id)
+                except CostLimitExceeded as exc:
+                    logger.warning("Critic LLM skipped due to cost limit for %s: %s", rule.rule_id, exc)
+                    return self.analyze(
+                        test_run_id=test_run_id,
+                        rule=rule,
+                        scenarios=scenarios,
+                        verdicts=verdicts,
+                        iteration=iteration,
+                        max_iterations=max_iterations,
+                    )
             try:
                 return await self._analyze_with_llm(
                     test_run_id=test_run_id,
@@ -40,8 +60,10 @@ class Critic:
                     iteration=iteration,
                     max_iterations=max_iterations,
                 )
-            except Exception:
-                pass
+            except CostLimitExceeded as exc:
+                logger.warning("Critic LLM cost limit exceeded for %s: %s", rule.rule_id, exc)
+            except Exception as exc:
+                logger.warning("Critic LLM failed for %s, falling back: %s", rule.rule_id, exc)
         return self.analyze(
             test_run_id=test_run_id,
             rule=rule,
@@ -154,6 +176,14 @@ class Critic:
             schema=_CRITIC_SCHEMA,
             temperature=0.1,
         )
+        if self._cost_tracker is not None:
+            response = get_last_response(self._llm_client)
+            if response is not None:
+                self._cost_tracker.add_usage(
+                    rule_id=rule.rule_id,
+                    model=response.model,
+                    usage=response.usage,
+                )
         raw_findings = payload.get("findings")
         if not isinstance(raw_findings, list):
             raise ValueError("critic output missing findings list")
